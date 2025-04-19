@@ -1,0 +1,71 @@
+
+```{r}
+library(readr)
+data = read_csv("student_lifestyle.csv", 
+                col_types = cols(
+                  Stress_Level = col_character(),
+                  Student_ID = col_integer(),
+                  .default = col_double()
+                ))
+```
+
+```{r}
+library(skimr)
+skim(data)
+
+head(data)
+```
+
+
+```{r}
+library(dplyr)
+```
+
+Закодируем переменную Stress_Level в числовой формат в переменную Stress_Level_num, чтобы сохранить порядок и градацию стресса.
+
+```{r}
+data = data %>%
+  mutate(Stress_Level_num = case_when(
+    Stress_Level == "Low"    ~ 0,
+    Stress_Level == "Moderate" ~ 1,
+    Stress_Level == "High"   ~ 2,
+    TRUE ~ NA_real_
+  )) %>%
+  select(-Stress_Level, -Student_ID) #удалим переменную Stress_Level и Student_ID
+
+data = data %>%
+  relocate(GPA, .after = last_col())  #переместим GPA в конец для удобства
+```
+
+Масштабируем целевую переменную GPA в шкалу оценивания от 0 до 10, как это принято в НИУ ВШЭ. Изначальная шкала была представлена в американском формате от 0 до 4
+
+```{r}
+data$GPA = data$GPA * 2.5
+head(data)
+```
+
+
+```{r}
+skim(data)
+```
+Пропусков в данных нет, выбросов тоже.
+
+Посмотрим на зависимость переменных друг от друга:
+
+```{r}
+library(corrplot)
+
+cor_matrix = cor(data)
+```
+```{r}
+heatmap(
+  cor_matrix,
+  symm = TRUE,
+  cexRow = 0.7,
+  cexCol = 0.7,
+  margins = c(8, 8)
+)
+```
+
+
+
