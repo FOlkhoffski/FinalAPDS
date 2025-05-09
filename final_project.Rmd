@@ -1,6 +1,28 @@
+---
+title: 'Группа 3. Предсказание уровня GPA студентов'
+author: 'Гасанова Алина, Кинаш Варвара, Ольховский Феликс, Райченко Софья, Созонова Евгения'
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(pander)
+library(caret)
+library(corrplot)
+library(dplyr)
+library(clustMixType)
+library(ggplot2)
+library(umap)
+library(dplyr)
+library(skimr)
+library(readr)
+library(car)
+```
+
+### Предобработка данных
 
 ```{r}
-library(readr)
 data = read_csv("student_lifestyle.csv", 
                 col_types = cols(
                   Stress_Level = col_character(),
@@ -10,15 +32,9 @@ data = read_csv("student_lifestyle.csv",
 ```
 
 ```{r}
-library(skimr)
 skim(data)
 
 head(data)
-```
-
-
-```{r}
-library(dplyr)
 ```
 
 Закодируем переменную Stress_Level в числовой формат в переменную Stress_Level_num, чтобы сохранить порядок и градацию стресса.
@@ -44,20 +60,16 @@ data$GPA = data$GPA * 2.5
 head(data)
 ```
 
-
 ```{r}
 skim(data)
 ```
+
 Пропусков в данных нет, выбросов тоже.
 
 Посмотрим на зависимость переменных друг от друга:
 
 ```{r}
-library(corrplot)
-
 cor_matrix = cor(data)
-```
-```{r}
 heatmap(
   cor_matrix,
   symm = TRUE,
@@ -67,5 +79,607 @@ heatmap(
 )
 ```
 
+### Линейная регрессия
 
+Для начала перекодируем переменную уровня стресса в факторную и поделим выборку на тестовую и тренировочную.
 
+```{r}
+data$Stress_Level = factor(data$Stress_Level_num, levels = c(0, 1, 2), ordered = TRUE)
+data = data %>% select(-Stress_Level_num)
+
+set.seed(100)
+test.ind = createDataPartition(data$GPA, p = 0.3, list = FALSE)
+test = data[test.ind, ]
+train = data[-test.ind, ]
+```
+
+Построим модель со всеми предикторами
+
+```{r}
+model_1 = lm(GPA ~ ., data = train)
+summary(model_1) %>% pander()
+```
+
+```{r}
+alias(model_1)
+```
+
+Из модели автоматически была исключена переменная Physical_Activity_Hours_Per_Day, поскольку для нее невозможно было рассчитать коэффициент. Произошло это из за того, что все переменные у нас показывают количество часов, а значит одну можно выразить через другие, и отсюда появляется сильная линейная зависимость между предикторами.
+
+Попробуем построить помимо этой модели еще несколько, в каждой новой будем исключать параметр, который ранее не убирали. После выявим наилучшую модель по метрикам RMSE, AIC, BIC.
+
+```{r}
+vars = c('Study_Hours_Per_Day', 'Extracurricular_Hours_Per_Day',
+         'Sleep_Hours_Per_Day','Social_Hours_Per_Day', 'Physical_Activity_Hours_Per_Day')
+res = data.frame(
+  Excluded = character(),
+  RMSE = numeric(),
+  AIC = numeric(),
+  BIC = numeric())
+
+for (v in vars) {
+  predictors = setdiff(vars, v)
+  formula = as.formula(
+    paste("GPA ~", paste(c(predictors, "Stress_Level"), collapse = " + "))
+  )
+  
+  model = lm(formula, data = train)
+  pred = predict(model, newdata = test)
+  rmse = mean((test$GPA - pred)^2) %>% sqrt()
+  aic = AIC(model)
+  bic = BIC(model)
+  
+  res = rbind(res, data.frame(
+    Excluded = v,
+    RMSE = rmse,
+    AIC = aic,
+    BIC = bic
+  ))
+}
+
+res %>% pander()
+```
+
+По полученной таблице можно сделать вывод, что без разницы какую переменную удалять, при отсутствии любого из 5 часовых предикторов предсказательная способность одинаковая.
+
+Меньше всего с GPA коррелирует Physical_Activity_Hours_Per_Day, поэтому ее и уберем. А также построим модели где помимо уже исключенной модели попробуем убрать еще одну, и выберем оптимальную.
+
+```{r}
+vars = c('Study_Hours_Per_Day', 'Extracurricular_Hours_Per_Day',
+         'Sleep_Hours_Per_Day','Social_Hours_Per_Day', 'Stress_Level')
+res = data.frame(
+  Excluded = character(),
+  RMSE = numeric(),
+  AIC = numeric(),
+  BIC = numeric())
+
+for (v in vars) {
+  predictors = setdiff(vars, v)
+  formula = as.formula(
+    paste("GPA ~", paste(predictors, collapse = " + "))
+  )
+  
+  model = lm(formula, data = train)
+  pred = predict(model, newdata = test)
+  rmse = mean((test$GPA - pred)^2) %>% sqrt()
+  aic = AIC(model)
+  bic = BIC(model)
+  
+  res = rbind(res, data.frame(
+    Excluded = v,
+    RMSE = rmse,
+    AIC = aic,
+    BIC = bic
+  ))
+}
+
+res %>% arrange(RMSE) %>% pander()
+```
+
+Наименьшее RMSE получилось при исключении переменных Social_Hours_Per_Day и Physical_Activity_Hours_Per_Day, значения критерия Акаике и Шварца не наименьшие, но мы прощаем это, поскольку нам важнее качество предсказания. При этом эти значения не сильно меньше тех, которые были у модели только без переменной Physical_Activity_Hours_Per_Day. Попробуем исключить еще переменную.
+
+```{r}
+vars = c('Study_Hours_Per_Day', 'Extracurricular_Hours_Per_Day',
+         'Sleep_Hours_Per_Day', 'Stress_Level')
+res = data.frame(
+  Excluded = character(),
+  RMSE = numeric(),
+  AIC = numeric(),
+  BIC = numeric())
+
+for (v in vars) {
+  predictors = setdiff(vars, v)
+  formula = as.formula(
+    paste("GPA ~", paste(predictors, collapse = " + "))
+  )
+  
+  model = lm(formula, data = train)
+  pred = predict(model, newdata = test)
+  rmse = mean((test$GPA - pred)^2) %>% sqrt()
+  aic = AIC(model)
+  bic = BIC(model)
+  
+  res = rbind(res, data.frame(
+    Excluded = v,
+    RMSE = rmse,
+    AIC = aic,
+    BIC = bic
+  ))
+}
+
+res %>% arrange(RMSE) %>% pander()
+```
+
+Значения RMSE поднялись по сравнению с результатами после прошлых итераций, так что остановимся на модели с исключенными Social_Hours_Per_Day и Physical_Activity_Hours_Per_Day. Рассмотрим эту модель поближе
+
+```{r}
+model = lm(GPA ~ Study_Hours_Per_Day + Extracurricular_Hours_Per_Day +
+         Sleep_Hours_Per_Day + Stress_Level, data = train)
+model %>% summary() %>% pander()
+```
+
+У построенной модели значимы на 10% уровне только 3 коэффициента, поэтому интерпретировать будем только их. При отсутствии влияния всех предикторов среднее значение GPA составляет 5 из 10. Количество учебный часов в день влияет сильнее всего, каждый час, посвященный учебе, повышает средний балл на 0,38. Каждый час, посвященный внеклассным занятиям, снижает GPA на 0,02. Построенная модель способна обьяснить 51% вариаций зависимой переменной.
+
+### Кластеризация
+#### K-prototypes
+
+Начнем со стандартизации непрерывных переменных и удалением переменной GPA.
+
+```{r, warning=FALSE}
+data_scaled = scale(data %>% select(-c(GPA, Stress_Level))) %>% as.data.frame()
+data_scaled$Stress_Level = data$Stress_Level
+```
+
+Определим наилучшее число кластеров.
+
+```{r, results='hide'}
+clust = numeric()
+for (k in 2:10) {
+  set.seed(5)
+  mod = kproto(data_scaled, k)
+  clust[k] = mod$tot.withinss}
+```
+```{r}
+
+plot(2:10, clust[2:10], type = "b", pch = 19,
+     xlab = "Число кластеров", ylab = "Total within-cluster distance",
+     main = "Зависимость WCD от числа кластеров")
+```
+
+По методу локтя оптимальное число кластеров получилось равным 3. Распределим наблюдения по кластерам с помощью kprototypes, а после построим визуализацию с помощью umap.
+
+```{r, results='hide'}
+kprot = kproto(data_scaled, k = 3)
+data$Cluster = as.factor(kprot$cluster)
+```
+
+```{r}
+data_numeric = data_scaled %>% mutate_if(is.factor, as.numeric)
+
+set.seed(5)
+umap = umap(data_numeric)
+data_umap = data.frame(umap$layout, cluster = as.factor(data$Cluster))
+
+ggplot(data_umap, aes(x = X1, y = X2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "3 кластера на UMAP") +
+  theme_minimal()
+```
+
+Группы выделяются странно, нет "чистых" облаков. Попробуем 4 кластера.
+
+```{r, results='hide'}
+kprot_4 = kproto(data_scaled, k = 4)
+data$Cluster_4 = as.factor(kprot_4$cluster)
+```
+```{r}
+set.seed(5)
+data_umap_4 = data.frame(umap$layout, cluster = as.factor(data$Cluster_4))
+
+ggplot(data_umap_4, aes(x = X1, y = X2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "4 кластера на проекции UMAP") +
+  theme_minimal()
+```
+
+Визуально лучше не стало, наблюдения все еще сильно перемешаны. Попробуем 2 кластера.
+
+```{r, results='hide'}
+kprot_2 = kproto(data_scaled, k = 2)
+data$Cluster_2 = as.factor(kprot_2$cluster)
+```
+```{r}
+set.seed(5)
+data_umap_2 = data.frame(umap$layout, cluster = as.factor(data$Cluster_2))
+
+ggplot(data_umap_2, aes(x = X1, y = X2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = " 2 кластера на проекции UMAP") +
+  theme_minimal()
+```
+
+Двух кластеров не достаточно для хорошего разбиения наших наблюдений. Остановимся на 3 кластерах, так как мы предполагаем, что GPA будет разбиваться на три группы: удовлетворительно, хорошо и отлично (уровней GPA, соответствующих оценке ниже 4 по 10-ти балльной шкале, у нас нет в наблюдениях). Проверим различаются ли средние значения GPA по кластерам с помощью теста ANOVA, но для начала проверим нормальность распределения и равенство дисперсий между кластерами.
+
+```{r, warning=FALSE}
+by(data$GPA, data$Cluster, shapiro.test) %>% pander()
+```
+
+Для всех кластеров нулевая гипотеза о соответствии нормальному закону подтверждается.
+
+```{r}
+bartlett.test(GPA ~ Cluster, data = data) %>% pander()
+```
+
+Полученное p-value очень мало, дисперсии кластеров существенно различаются между собой, мы не можем применить тест ANOVA. Проверим медианные значения с помощью непараметрического теста Welch ANOVA.
+
+```{r}
+oneway.test(GPA ~ Cluster, data = data) %>% pander()
+```
+
+P-value сильно меньше 1% уровня значимости, это значит, что хотя бы одна группа значимо отличается от остальных. Посмотрим на медианные значения.
+
+```{r}
+data %>% group_by(Cluster) %>% summarise(median_GPA = median(GPA)) %>% pander()
+```
+
+Медианные значения GPA первого и третьего кластера различаются на один балл, второй же кластер не сильно выделяется.
+
+Построим боксплоты для визуального определения различий между кластерами.
+
+## {.tabset}
+### GPA
+```{r}
+ggplot(data, aes(x = Cluster, y = GPA, fill = Cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение GPA по кластерам",
+       x = "Кластер", y = "GPA") +
+  theme_minimal()
+```
+
+### Study Hours
+```{r}
+ggplot(data, aes(x = Cluster, y = Study_Hours_Per_Day, fill = Cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Study Hours по кластерам",
+       x = "Кластер", y = "Study Hours") +
+  theme_minimal()
+```
+
+### Extracurricular_Hours
+```{r}
+ggplot(data, aes(x = Cluster, y = Extracurricular_Hours_Per_Day,
+                 fill = Cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Extracurricular Hours по кластерам",
+       x = "Кластер", y = "Extracurricular Hours") +
+  theme_minimal()
+```
+
+### Sleep Hours
+```{r}
+ggplot(data, aes(x = Cluster, y = Sleep_Hours_Per_Day,
+                 fill = Cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Sleep Hours по кластерам",
+       x = "Кластер", y = "Sleep Hours") +
+  theme_minimal()
+```
+
+### Social Hours
+```{r}
+ggplot(data, aes(x = Cluster, y = Social_Hours_Per_Day,
+                 fill = Cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Social Hours по кластерам",
+       x = "Кластер", y = "Social Hours") +
+  theme_minimal()
+```
+
+### Physical Activity Hours
+```{r}
+ggplot(data, aes(x = Cluster, y = Physical_Activity_Hours_Per_Day,
+                 fill = Cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Physical Activity Hours по кластерам",
+       x = "Кластер", y = "Physical Activity Hours") +
+  theme_minimal()
+```
+
+### Stress Level
+```{r}
+data %>%
+  group_by(Cluster, Stress_Level) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Cluster) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = Cluster, y = prop, fill = as.factor(Stress_Level))) +
+  geom_col(position = "fill") + 
+  scale_fill_manual(values = c("0" = "#87CEFA", 
+                             "1" = "#1E90FF", 
+                             "2" = "navyblue")) +
+  labs(title = "Доли уровней стресса внутри каждого кластера",
+       x = "Кластер", y = "Доля",
+       fill = "Уровень стресса") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_minimal()
+```
+
+## {.unnumbered}
+
+Таким образом, несмотря на то, что статистически выделенные кластеры хорошие, на практике они не добавят нам полезной информации. Если различия между 1 и 2 кластром еще можно как то описать (и то разница в 1 балл по 10-ти бальной шкале не очень информативно), то различия между 2 и 3 кластером минимальны. Мы не будем использовать результаты кластеризации в предсказательных моделях, поскольку они не добавляют никакой новой информации и плохо показывают ненаблюдаемые индивидуальные различия между группами.
+
+#### K-means
+
+Попробуем удалить Stress_Level и использовать kmeans. Сначала построим 3 кластера.
+
+```{r}
+set.seed(5)
+kmeans_3 = data_scaled %>% select(-Stress_Level) %>% kmeans(, centers = 3, nstart = 25)
+
+data$kmeans_cluster = as.factor(kmeans_3$cluster)
+```
+
+```{r}
+data_numeric_kmeans = data_scaled %>% select(-Stress_Level)
+
+set.seed(5)
+umap_kmeans = umap(data_numeric_kmeans)
+
+data_umap_kmeans = data.frame(umap_kmeans$layout, cluster = data$kmeans_cluster)
+
+ggplot(data_umap_kmeans, aes(x = X1, y = X2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "3 кластера на UMAP для kmeans") +
+  theme_minimal()
+```
+
+Данные неплохо разбились на 3 кластера, но все же некоторые наблюдения попадают в чужие облака, построим 4 кластера.
+
+```{r}
+set.seed(5)
+kmeans_4 = data_scaled %>% select(-Stress_Level) %>% kmeans(, centers = 4, nstart = 25)
+
+data$kmeans_cluster_4 = as.factor(kmeans_4$cluster)
+```
+
+```{r}
+set.seed(5)
+data_umap_kmeans <- data.frame(umap_kmeans$layout, cluster = data$kmeans_cluster_4)
+
+ggplot(data_umap_kmeans, aes(x = X1, y = X2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "4 кластера на UMAP для kmeans") +
+  theme_minimal()
+```
+
+Добавление еще одного кластера не помогло, построим 2 кластера.
+
+```{r}
+set.seed(5)
+kmeans_2 = data_scaled %>% select(-Stress_Level) %>% kmeans(, centers = 2, nstart = 25)
+
+data$kmeans_cluster_2 = as.factor(kmeans_2$cluster)
+```
+
+```{r}
+set.seed(5)
+data_umap_kmeans <- data.frame(umap_kmeans$layout, cluster = data$kmeans_cluster_2)
+
+ggplot(data_umap_kmeans, aes(x = X1, y = X2, color = cluster)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "2 кластера на UMAP для kmeans") +
+  theme_minimal()
+```
+
+Два кластера так же, как и три, дают хорошее разбиение, но мы решили остановиться на трех, поскольку такое количество групп, на наш взгляд, логичнее применить к уровням GPA.
+
+Посчитаем медианные значения GPA по кластерам.
+
+```{r}
+data %>% group_by(kmeans_cluster) %>% summarise(median_GPA = median(GPA)) %>% pander()
+```
+
+Медианные значения вышли очень близкими друг к другу. Проверим данные по GPA по кластерам на нормальность.
+
+```{r, warning=FALSE}
+by(data$GPA, data$kmeans_cluster, shapiro.test) %>% pander()
+```
+
+Судя по результатам теста, только для первого и третьего кластера гипотеза о нормальности распределения наблюдений не отвергается на уровне значимости 5%. Во втором кластере данные распределены не по нормальному закону.
+
+Проверим сходство дисперсий.
+
+```{r}
+leveneTest(GPA ~ kmeans_cluster, data = data) %>% pander()
+```
+
+Судя по результатам теста, нет статистически значимых различий в дисперсиях кластеров. Можем применить тест ANOVA, который устойчив к небольшим отклонениям от нормальности.
+
+```{r}
+aov(GPA ~ kmeans_cluster, data = data) %>% summary() %>% pander()
+```
+
+Резултаты дисперсионного анализа показывают, что различия между средниями значениями GPA по кластерам статистически значимы, хотя бы один кластер отличается.
+
+Построим по каждой переменной ящик с усами для выявления возможных различий между кластерами.
+
+## {.tabset}
+### GPA
+
+```{r}
+ggplot(data, aes(x = kmeans_cluster, y = GPA, fill = kmeans_cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение GPA по кластерам",
+       x = "Кластер", y = "GPA") +
+  theme_minimal()
+```
+
+### Study Hours
+```{r}
+ggplot(data, aes(x = kmeans_cluster, y = Study_Hours_Per_Day, fill = kmeans_cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Study Hours по кластерам",
+       x = "Кластер", y = "Study Hours") +
+  theme_minimal()
+```
+
+### Extracurricular_Hours
+```{r}
+ggplot(data, aes(x = kmeans_cluster, y = Extracurricular_Hours_Per_Day,
+                 fill = kmeans_cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Extracurricular Hours по кластерам",
+       x = "Кластер", y = "Extracurricular Hours") +
+  theme_minimal()
+```
+
+### Sleep Hours
+```{r}
+ggplot(data, aes(x = kmeans_cluster, y = Sleep_Hours_Per_Day,
+                 fill = kmeans_cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Sleep Hours по кластерам",
+       x = "Кластер", y = "Sleep Hours") +
+  theme_minimal()
+```
+
+### Social Hours
+```{r}
+ggplot(data, aes(x = kmeans_cluster, y = Social_Hours_Per_Day,
+                 fill = kmeans_cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Social Hours по кластерам",
+       x = "Кластер", y = "Social Hours") +
+  theme_minimal()
+```
+
+### Physical Activity Hours
+```{r}
+ggplot(data, aes(x = kmeans_cluster, y = Physical_Activity_Hours_Per_Day,
+                 fill = kmeans_cluster)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Physical Activity Hours по кластерам",
+       x = "Кластер", y = "Physical Activity Hours") +
+  theme_minimal()
+```
+
+## {.unnumbered}
+
+Получается, что кластеризация без учета переменной Stress_Level тоже дала довольно схожие группы.
+
+Обе кластеризации могли не дать ярких результатов в силу слабой корреляции между целевой и обьясняющими переменными. Мы не будем использовать результаты ни по одному из методов в наших предсказательных моделях.
+
+#### Самостоятельно выделенные группы
+
+Однако нам все еще интересно посмотреть обладают ли студенты разных групп, выделенных по высоте оценке, какими то отличиями.Попробуем самостоятельно выделить группы по уровню GPA и посмотреть имеются ли какие то характерные отличия в этих группах. Выделять будем по вышкинской системе, то есть, 4-5 = удовлетворительно, 6-7 = хорошо, 8-10 = отлично.
+
+```{r}
+data = data %>% mutate(group = case_when(
+  GPA >= 4 & GPA < 6 ~ 1,
+  GPA >= 6 & GPA < 7 ~ 2,
+  GPA >= 7 & GPA <= 10 ~ 3
+))
+```
+
+```{r}
+table(data$group) %>% prop.table() %>% pander()
+```
+
+Группы получились несбалансированными, но поскольку у нас нет цели применить их в предсказательной модели, а нам интересно посмотреть на различия между группами, мы простим это. 
+
+## {.tabset}
+### GPA
+```{r}
+data$group <- factor(data$group, levels = c(1, 2, 3),
+                     labels = c("Low GPA", "Mid GPA", "High GPA"))
+
+ggplot(data, aes(x = group, y = GPA, fill = group)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение GPA по выделенным группам",
+       x = "Группа", y = "GPA") +
+  theme_minimal()
+```
+
+### Study Hours
+```{r}
+ggplot(data, aes(x = group, y = Study_Hours_Per_Day, fill = group)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Study Hours по выделенным группам",
+       x = "Группа", y = "Study Hours") +
+  theme_minimal()
+```
+
+### Extracurricular_Hours
+```{r}
+ggplot(data, aes(x = group, y = Extracurricular_Hours_Per_Day,
+                 fill = group)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Extracurricular Hours по выделенным группам",
+       x = "Группа", y = "Extracurricular Hours") +
+  theme_minimal()
+```
+
+### Sleep Hours
+```{r}
+ggplot(data, aes(x = group, y = Sleep_Hours_Per_Day,
+                 fill = group)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Sleep Hours по выделенным группам",
+       x = "Группа", y = "Sleep Hours") +
+  theme_minimal()
+```
+
+### Social Hours
+```{r}
+ggplot(data, aes(x = group, y = Social_Hours_Per_Day,
+                 fill = group)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Social Hours по выделенным группам",
+       x = "Группа", y = "Social Hours") +
+  theme_minimal()
+```
+
+### Physical Activity Hours
+```{r}
+ggplot(data, aes(x = group, y = Physical_Activity_Hours_Per_Day,
+                 fill = group)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Распределение Physical Activity Hours по выделенным группам",
+       x = "Группа", y = "Physical Activity Hours") +
+  theme_minimal()
+```
+
+### Stress Level
+```{r}
+data %>%
+  group_by(group, Stress_Level) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = group, y = prop, fill = as.factor(Stress_Level))) +
+  geom_col(position = "fill") + 
+  scale_fill_manual(values = c("0" = "#87CEFA", 
+                             "1" = "#1E90FF", 
+                             "2" = "navyblue")) +
+  labs(title = "Доли уровней стресса внутри каждой выделенной группы",
+       x = "Группа", y = "Доля",
+       fill = "Уровень стресса") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_minimal()
+```
+
+## {.unnumbered}
+
+Студенты с высоким уровнем GPA уделяют учёбе больше времени, чем все остальные. Даже аномальное значение в группе с низким GPA не достигает уровня их первого квартиля.
+
+Количество внеурочных часов у студентов с высоким или средним GPA имеет больший разброс, чем у тех, чей GPA можно назвать низким.
+
+Половина опрошенных студентов в каждой группе спит от 7 до 8 часов. Однако у студентов со средним или высоким GPA продолжительность сна варьируется от 5 до 10 часов, в то время как у студентов с низким GPA этот диапазон составляет от 5,25 до почти 9 часов.
+
+Время на внеурочное общение примерно одинаково для всех трёх групп.
+
+Чем выше уровень GPA, тем меньше времени уделяется спортивной активности.
+
+Что касается уровня стресса, то чем выше GPA, тем больше доля студентов, испытывающих сильное нервное напряжение. При этом доля тех, чей стресс можно охарактеризовать как умеренный, примерно одинакова в группах со средним и высоким GPA.
+
+Также стоит отметить, что из-за малого объёма первой группы такие характеристики, как внеурочные часы, часы сна и время, проведённое не за учебой, скорее всего, будут примерно одинаковы для всех трёх групп. Это перекликается с построенной ранее корреляционной матрицей, из которой видно, что с GPA слабо коррелируют все признаки, кроме уровня стресса и количества часов, посвящённых учёбе.
