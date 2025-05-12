@@ -18,6 +18,9 @@ library(dplyr)
 library(skimr)
 library(readr)
 library(car)
+library(caret)
+library(xgboost)
+library(Metrics)
 ```
 
 ### Предобработка данных
@@ -683,3 +686,54 @@ data %>%
 Что касается уровня стресса, то чем выше GPA, тем больше доля студентов, испытывающих сильное нервное напряжение. При этом доля тех, чей стресс можно охарактеризовать как умеренный, примерно одинакова в группах со средним и высоким GPA.
 
 Также стоит отметить, что из-за малого объёма первой группы такие характеристики, как внеурочные часы, часы сна и время, проведённое не за учебой, скорее всего, будут примерно одинаковы для всех трёх групп. Это перекликается с построенной ранее корреляционной матрицей, из которой видно, что с GPA слабо коррелируют все признаки, кроме уровня стресса и количества часов, посвящённых учёбе.
+
+### Бустинг 
+
+Настроим кросс-валидацию и начальные гиперпараметры для перебора
+```{r}
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE
+)
+
+grid <- expand.grid(
+  nrounds = c(50, 100, 150),
+  max_depth = c(3, 6, 9),
+  eta = c(0.01, 0.1, 0.3),
+  gamma = c(0, 1),
+  colsample_bytree = c(0.7),
+  min_child_weight = c(1, 5),
+  subsample = c(0.7)
+)
+
+xgb_model <- train(
+  GPA ~ .,
+  data = train,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneGrid = grid,
+  metric = "RMSE"
+)
+```
+
+\
+
+Посмотрим на гиперпараметры лучшей модели, которые подобрал алгоритм:
+```{r}
+print(xgb_model$bestTune)
+```
+
+Теперь посмотрим на оценки качества модели:
+```{r}
+preds <- predict(xgb_model, newdata = test)
+
+rmse_val <- rmse(test$GPA, preds)
+mae_val <- mae(test$GPA, preds)
+r2_val <- 1 - sum((test$GPA - preds)^2) / sum((test$GPA - mean(test$GPA))^2)
+
+cat("Метрики модели после подбора:\n")
+cat("RMSE:", round(rmse_val, 4), "\n")
+cat("MAE :", round(mae_val, 4), "\n")
+cat("R²  :", round(r2_val, 4), "\n")
+```
